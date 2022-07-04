@@ -6,6 +6,13 @@ import "./Ownable.sol";
 import "./Context.sol";
 import "./IBEP20.sol";
 
+// min busd:        10000000000000000000000 (10 000$)
+// max busd:        10000000000000000000000000 (10 000 000$)
+// buy rate:        10000000000000000 (0.001$)
+// buyback rate:    20000000000000000 (0.002$)
+
+// dlp deposit amount: 1000000000000000000000000000 (1 000 000 000 DLP)
+
 struct SaleEvent {
     bool paused;
     uint256 minBusd;
@@ -15,9 +22,11 @@ struct SaleEvent {
 }
 
 contract Invest is Ownable {
-    IBEP20 private _dlpContract = IBEP20(0xD7ACd2a9FD159E69Bb102A1ca21C9a3e3A5F771B);
-    IBEP20 private _busdContract = IBEP20(0x7EF2e0048f5bAeDe046f6BF797943daF4ED8CB47);
+    IBEP20 private _dlpContract = IBEP20(0xd9145CCE52D386f254917e481eB44e9943F39138);
+    IBEP20 private _busdContract = IBEP20(0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8);
     SaleEvent private _event;
+    uint private _totalInvestors = 0;
+    mapping (uint => address) private _shares;
     mapping(address => uint256) private _invests;
     uint256 private _frozenDlp = 0;
 
@@ -34,6 +43,9 @@ contract Invest is Ownable {
 
     function _createEvent(SaleEvent memory ev) private returns (SaleEvent storage) {
         require(_event.minBusd == 0, "Event already started");
+        require(ev.buybackRate > 0, "Buyback rate cannot be zero");
+        require(ev.buyRate > 0, "Buy rate cannot be zero");
+        require(ev.maxBusd > ev.minBusd, "Invalid limits");
 
         _event = ev;
 
@@ -56,7 +68,9 @@ contract Invest is Ownable {
 
         _busdContract.transferFrom(investor, address(this), busdAmount);
         _invests[investor] += wantDlpAmount;
+        _shares[_totalInvestors] = investor;
         _frozenDlp += wantDlpAmount;
+        _totalInvestors += 1;
     }
 
     function _investBalance(address investor) private view returns (uint256 dlp, uint256 busd) {
@@ -64,6 +78,53 @@ contract Invest is Ownable {
         busd = _invests[investor] * _event.buybackRate;
 
         return (dlp, busd);
+    }
+
+    function _buyback(uint256 busdAmount) private {
+        uint256 busdBalance = _busdContract.balanceOf(address(this));
+
+        require(busdBalance >= busdAmount, "Insufficient funds");
+        require(busdAmount >= 1e18, "Cannot distibute less than 1 BUSD");
+        require(_frozenDlp > 0, "No invests");
+
+        uint256 distibuted = 0;
+
+        for(uint256 i = 0; i < _totalInvestors; i++) {
+            address investor = _shares[i];
+            uint256 toDistibute = _invests[investor] * _event.buybackRate;
+
+            if(distibuted >= busdAmount || toDistibute <= 0) {
+                continue;
+            }
+            
+            if(investor == address(0)) {
+                continue;
+            }
+
+            if(_invests[investor] <= 0) {
+                continue;
+            }
+
+            uint256 percentOfShare = _invests[investor] * 1e4 / _frozenDlp;
+            uint256 profitAmountBusd = busdAmount * percentOfShare / 1e4;
+            uint256 repaidDebtDlp = profitAmountBusd / _event.buybackRate;
+
+            if(percentOfShare == 0) {
+                continue;
+            }
+
+            if(profitAmountBusd == 0) {
+                continue;
+            }
+
+            if(repaidDebtDlp == 0) {
+                continue;
+            }
+
+            _busdContract.transfer(investor, profitAmountBusd);
+            _invests[investor] -= repaidDebtDlp;
+            _frozenDlp -= repaidDebtDlp;
+        }
     }
 
     function createEvent(
@@ -112,5 +173,17 @@ contract Invest is Ownable {
 
     function investBalanceOf(address investor) public view returns (uint256 dlp) {
         return (_invests[investor]);
+    }
+
+    function totalInvestors() public view returns (uint256) {
+        return _totalInvestors;
+    }
+
+    function shareBy(uint256 index) public view returns (address) {
+        return _shares[index];
+    }
+
+    function buyback(uint256 busdAmount) public onlyOwner {
+        _buyback(busdAmount);
     }
 }
